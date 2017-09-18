@@ -60,8 +60,12 @@
 #define     JP2_BPCC 0x62706363    /**< Bits per component box */
 #define     JP2_JP2  0x6a703220    /**< File type fields */
 
+/*----- 2017-09-01 Ralfs , enabled to write resolution boxes -----*/
+#define		JP2_RES 0x72657320	/**< Resolution box (super-box) 18 or 36 byte content length + 8 bytes self */
+#define		JP2_RESC 0x72657363	/**< Resolution capture box (fixed length 18 bytes (0x12) */
+#define		JP2_RESD 0x72657364	/**< Resolution capture box (fixed length 18 bytes (0x12) */
+
 /* For the future */
-/* #define JP2_RES 0x72657320 */  /**< Resolution box (super-box) */
 /* #define JP2_JP2I 0x6a703269 */  /**< Intellectual property box */
 /* #define JP2_XML  0x786d6c20 */  /**< XML box */
 /* #define JP2_UUID 0x75756994 */  /**< UUID box */
@@ -158,6 +162,25 @@ typedef struct opj_jp2 {
     OPJ_UINT32 w;
     /* height of image */
     OPJ_UINT32 h;
+
+	/*----- DPI, capture and display resolution variables -----*/
+	OPJ_FLOAT32 dpiX; /** Not implemented */
+	OPJ_FLOAT32 dpiY; /** Not implemented */
+
+	OPJ_UINT16 vrdn; /** Vertical display numerator */
+	OPJ_UINT16 vrdd; /** Vertical display denominator */
+	OPJ_CHAR vrde; /** Vertical display exponent */
+	OPJ_UINT16 hrdn; /** Horizontal display numerator */
+	OPJ_UINT16 hrdd; /** Horizontal display denominator */
+	OPJ_CHAR hrde; /** Horizontal display exponent */
+
+	OPJ_UINT16 vrcn; /** Vertical capture numerator */
+	OPJ_UINT16 vrcd; /** Vertical capture denominator */
+	OPJ_CHAR vrce; /** Vertical capture exponent */
+	OPJ_UINT16 hrcn; /** Horizontal capture numerator */
+	OPJ_UINT16 hrcd; /** Horizontal capture denominator */
+	OPJ_CHAR hrce; /** Horizontal capture exponent */
+
     /* number of components in the image */
     OPJ_UINT32 numcomps;
     OPJ_UINT32 bpc;

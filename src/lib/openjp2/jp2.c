@@ -871,6 +871,65 @@ static OPJ_BYTE * opj_jp2_write_colr(opj_jp2_t *jp2,
     return l_colr_data;
 }
 
+/** 2017-09-01 Ralfs , add resolution box writer. Won't be called at all
+	if both capture and display denominators are zero.
+	TODO - add div/0 checks to parameter validation routines */
+static OPJ_BYTE * opj_jp2_write_res(opj_jp2_t *jp2,
+	OPJ_UINT32 * p_nb_bytes_written)
+{
+	OPJ_UINT32 l_res_size = 8; /* res\040 superbox itself*/
+	if (jp2->hrcd != 0 && jp2->vrcd != 0) { /* can write resc */
+		l_res_size += 18;
+	}
+	if (jp2->hrdd != 0 && jp2->vrdd != 0) { /* can write resd */
+		l_res_size += 18;
+	}
+	OPJ_BYTE * l_current_res_ptr = (OPJ_BYTE*)opj_calloc(1, l_res_size);
+	OPJ_BYTE * l_res_data = l_current_res_ptr;
+
+	opj_write_bytes(l_current_res_ptr, l_res_size, 4);
+	l_current_res_ptr += 4;
+	opj_write_bytes(l_current_res_ptr, JP2_RES, 4);
+	l_current_res_ptr += 4;
+	if (jp2->hrcd != 0 && jp2->vrcd != 0) { /* write resc */
+		opj_write_bytes(l_current_res_ptr, 18, 4);
+		l_current_res_ptr += 4;
+		opj_write_bytes(l_current_res_ptr, JP2_RESC, 4);
+		l_current_res_ptr += 4;
+		opj_write_bytes(l_current_res_ptr, jp2->vrcn, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->vrcd, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->hrcn, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->hrcd, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->vrce, 1);
+		l_current_res_ptr += 1;
+		opj_write_bytes(l_current_res_ptr, jp2->hrce, 1);
+		l_current_res_ptr += 1;
+	}
+	if (jp2->hrdd != 0 && jp2->vrdd != 0) { /* write resd */
+		opj_write_bytes(l_current_res_ptr, 18, 4);
+		l_current_res_ptr += 4;
+		opj_write_bytes(l_current_res_ptr, JP2_RESD, 4);
+		l_current_res_ptr += 4;
+		opj_write_bytes(l_current_res_ptr, jp2->vrdn, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->vrdd, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->hrdn, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->hrdd, 2);
+		l_current_res_ptr += 2;
+		opj_write_bytes(l_current_res_ptr, jp2->vrde, 1);
+		l_current_res_ptr += 1;
+		opj_write_bytes(l_current_res_ptr, jp2->hrde, 1);
+		l_current_res_ptr += 1;
+	}
+	*p_nb_bytes_written = l_res_size;
+	return l_res_data;
+}
 static void opj_jp2_free_pclr(opj_jp2_color_t *color)
 {
     opj_free(color->jp2_pclr->channel_sign);
@@ -1083,7 +1142,7 @@ static OPJ_BOOL opj_jp2_apply_pclr(opj_image_t *image,
         if (!new_comps[i].data) {
             while (i > 0) {
                 -- i;
-                opj_image_data_free(new_comps[i].data);
+                opj_free(new_comps[i].data);
             }
             opj_free(new_comps);
             opj_event_msg(p_manager, EVT_ERROR,
@@ -1140,6 +1199,8 @@ static OPJ_BOOL opj_jp2_apply_pclr(opj_image_t *image,
     opj_free(old_comps);
     image->comps = new_comps;
     image->numcomps = nr_channels;
+
+    opj_jp2_free_pclr(color);
 
     return OPJ_TRUE;
 }/* apply_pclr() */
@@ -1692,6 +1753,12 @@ static OPJ_BOOL opj_jp2_write_jp2h(opj_jp2_t *jp2,
         l_nb_pass++;
     }
 
+	/* 2017-09-01 Ralfs , add resolution box writer */
+	if ((jp2->hrcd != 0 && jp2->vrcd != 0) || (jp2->hrdd != 0 && jp2->vrdd != 0)) {
+		l_writers[l_nb_pass].handler = opj_jp2_write_res;
+		l_nb_pass++;
+	}
+
     /* write box header */
     /* write JP2H type */
     opj_write_bytes(l_jp2h_data + 4, JP2_JP2H, 4);
@@ -2085,6 +2152,26 @@ OPJ_BOOL opj_jp2_setup_encoder(opj_jp2_t *jp2,
     jp2->approx = 0;        /* APPROX */
 
     jp2->jpip_on = parameters->jpip_on;
+
+	/* 2017-09-01 Ralfs , setup resolution box */
+	jp2->dpiX = image->comps[0].hdpi;
+	jp2->dpiY = image->comps[0].vdpi;
+	if (jp2->dpiX > 0 && jp2->dpiY > 0) {
+		float INCHES_IN_METER = 39.37007874015748031496062992126;
+		float DOTS_PER_METER_X = jp2->dpiX * INCHES_IN_METER;
+		float DOTS_PER_METER_Y = jp2->dpiY * INCHES_IN_METER;
+		/* Formula: 32768 / (dots per meter / 100000) or (int)(dots per meter * 0.32768) */
+		// jp2->hrcn = 0x0f1e;
+		jp2->hrcn = jp2->hrdn = round(DOTS_PER_METER_X * 0.32768);
+		jp2->hrcd = jp2->hrdd = 0x8000;
+		jp2->hrce = jp2->hrde  = 0x5; // this can be const or exponent is number of integer digits in dpm
+		jp2->vrcn = jp2->vrdn = round(DOTS_PER_METER_Y * 0.32768);
+		jp2->vrcd = jp2->vrdd = 0x8000;
+		jp2->vrce = jp2->vrde = 0x5;
+	}
+	else {
+		jp2->hrcd = jp2->vrcd = jp2->hrdd = jp2->vrdd = 0;
+	}
 
     return OPJ_TRUE;
 }
