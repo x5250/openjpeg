@@ -381,12 +381,9 @@ typedef struct opj_cparameters {
     OPJ_UINT32 numpocs;
     /** number of layers */
     int tcp_numlayers;
-    /** rates of layers - might be subsequently limited by the max_cs_size field.
-     * Should be decreasing. 1 can be
-     * used as last value to indicate the last layer is lossless. */
+    /** rates of layers - might be subsequently limited by the max_cs_size field */
     float tcp_rates[100];
-    /** different psnr for successive layers. Should be increasing. 0 can be
-     * used as last value to indicate the last layer is lossless. */
+    /** different psnr for successive layers */
     float tcp_distoratio[100];
     /** number of resolutions */
     int numresolution;
@@ -643,6 +640,10 @@ typedef struct opj_image_comp {
     OPJ_UINT32 w;
     /** data height */
     OPJ_UINT32 h;
+	/** horizontal resolution */
+	OPJ_FLOAT32 hdpi;
+	/** vertical resolution */
+	OPJ_FLOAT32 vdpi;
     /** x component offset compared to the whole image */
     OPJ_UINT32 x0;
     /** y component offset compared to the whole image */
@@ -1338,16 +1339,6 @@ OPJ_API OPJ_BOOL OPJ_CALLCONV opj_read_header(opj_stream_t *p_stream,
 
 /**
  * Sets the given area to be decoded. This function should be called right after opj_read_header and before any tile header reading.
- *
- * The coordinates passed to this function should be expressed in the reference grid,
- * that is to say at the highest resolution level, even if requesting the image at lower
- * resolution levels.
- *
- * Generally opj_set_decode_area() should be followed by opj_decode(), and the
- * codec cannot be re-used.
- * In the particular case of an image made of a single tile, several sequences of
- * calls to opoj_set_decode_area() and opj_decode() are allowed, and will bring
- * performance improvements when reading an image by chunks.
  *
  * @param   p_codec         the jpeg2000 codec.
  * @param   p_image         the decoded image previously setted by opj_read_header
