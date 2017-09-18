@@ -201,7 +201,10 @@ opj_image_t *pngtoimage(const char *read_idf, opj_cparameters_t * params)
         }
     }
     png_read_image(png, rows);
-
+	OPJ_UINT32 hdpi, vdpi;
+	hdpi = vdpi = 0; /* set to 0 to avoid resolution box writing */
+	hdpi = png_get_x_pixels_per_inch(png, info);
+	vdpi = png_get_y_pixels_per_inch(png, info);
     /* Create image */
     memset(cmptparm, 0, sizeof(cmptparm));
     for (i = 0; i < nr_comp; ++i) {
@@ -237,6 +240,8 @@ opj_image_t *pngtoimage(const char *read_idf, opj_cparameters_t * params)
 
     for (i = 0; i < nr_comp; i++) {
         planes[i] = image->comps[i].data;
+		image->comps[i].hdpi = hdpi;
+		image->comps[i].vdpi = vdpi;
     }
 
     for (i = 0; i < height; ++i) {

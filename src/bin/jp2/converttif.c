@@ -1256,6 +1256,8 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
     opj_image_t *image = NULL;
     uint16 tiBps, tiPhoto, tiSf, tiSpp, tiPC;
     uint32 tiWidth, tiHeight;
+	float dpix, dpiy;
+	uint16 tiCompression;
     OPJ_BOOL is_cinema = OPJ_IS_CINEMA(parameters->rsiz);
     convert_XXx32s_C1R cvtTifTo32s = NULL;
     convert_32s_CXPX cvtCxToPx = NULL;
@@ -1270,7 +1272,7 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
     }
     tiBps = tiPhoto = tiSf = tiSpp = tiPC = 0;
     tiWidth = tiHeight = 0;
-
+	dpix = dpiy = 0;
     TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &tiWidth);
     TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &tiHeight);
     TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &tiBps);
@@ -1278,8 +1280,15 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
     TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &tiSpp);
     TIFFGetField(tif, TIFFTAG_PHOTOMETRIC, &tiPhoto);
     TIFFGetField(tif, TIFFTAG_PLANARCONFIG, &tiPC);
-    w = (int)tiWidth;
+	TIFFGetField(tif, TIFFTAG_XRESOLUTION, &dpix);
+	TIFFGetField(tif, TIFFTAG_YRESOLUTION, &dpiy);
+	TIFFGetField(tif, TIFFTAG_COMPRESSION, &tiCompression);
+
+	w = (int)tiWidth;
     h = (int)tiHeight;
+
+	/* 2017-09-04 Ralfs , remedy for malformed TIF tags */
+	if (tiSpp == 0) tiSpp = 1;
 
     if (tiSpp == 0 || tiSpp > 4) { /* should be 1 ... 4 */
         fprintf(stderr, "tiftoimage: Bad value for samples per pixel == %d.\n"
@@ -1293,7 +1302,8 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
         TIFFClose(tif);
         return NULL;
     }
-    if (tiPhoto != PHOTOMETRIC_MINISBLACK && tiPhoto != PHOTOMETRIC_RGB) {
+    if (tiPhoto != PHOTOMETRIC_MINISWHITE  && tiPhoto != PHOTOMETRIC_MINISBLACK &&
+		tiPhoto != PHOTOMETRIC_RGB && tiPhoto != PHOTOMETRIC_PALETTE) {
         fprintf(stderr,
                 "tiftoimage: Bad color format %d.\n\tOnly RGB(A) and GRAY(A) has been implemented\n\tAborting.\n",
                 (int) tiPhoto);
@@ -1370,11 +1380,13 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
     }
 
     numcomps = tiSpp;
-    if (tiPhoto == PHOTOMETRIC_RGB) { /* RGB(A) */
+    if (tiPhoto == PHOTOMETRIC_RGB || tiPhoto == PHOTOMETRIC_MINISWHITE) { /* RGB(A) or 1bpp */
         color_space = OPJ_CLRSPC_SRGB;
-    } else if (tiPhoto == PHOTOMETRIC_MINISBLACK) { /* GRAY(A) */
+    } else if (tiPhoto == PHOTOMETRIC_MINISBLACK || 
+		(tiPhoto == PHOTOMETRIC_PALETTE && tiBps == 8 && tiSpp == 1)) { /* GRAY(A) */
         color_space = OPJ_CLRSPC_GRAY;
     }
+
 
     cvtCxToPx = convert_32s_CXPX_LUT[numcomps];
     if (tiPC == PLANARCONFIG_SEPARATE) {
@@ -1417,9 +1429,11 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
         opj_image_destroy(image);
         return NULL;
     }
-
-    for (j = 0; j < numcomps; j++) {
+	/* 2017-09-01 Ralfs , set dpi values */
+	for (j = 0; j < numcomps; j++) {
         planes[j] = image->comps[j].data;
+		image->comps[j].hdpi = dpix;
+		image->comps[j].vdpi = dpiy;
     }
     image->comps[numcomps - 1].alpha = (OPJ_UINT16)(1 - (numcomps & 1));
 
@@ -1480,8 +1494,22 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
             dat8 = (const OPJ_UINT8*)buf;
 
             while (ssize >= rowStride) {
-                cvtTifTo32s(dat8, buffer32s, (OPJ_SIZE_T)w * tiSpp);
-                cvtCxToPx(buffer32s, planes, (OPJ_SIZE_T)w);
+				/* 2017-09-03 Ralfs , invert bits if MINISWHITE and image is 1bpp */
+				/* more effective would be invert during bit expansion */
+				if (tiPhoto == PHOTOMETRIC_MINISWHITE && tiBps == 1 && tiSpp == 1)
+				{
+					OPJ_UINT8* bitline = malloc(rowStride);
+					OPJ_UINT8* p = bitline, *d = dat8;
+					for (int i = 0; i < rowStride; i++)
+					{
+						p[i] = ~(d[i]);
+					}
+					cvtTifTo32s(bitline, buffer32s, (OPJ_SIZE_T)w * tiSpp);
+					free(bitline);
+				}
+				else
+				cvtTifTo32s(dat8, buffer32s, (OPJ_SIZE_T)w * tiSpp);
+				cvtCxToPx(buffer32s, planes, (OPJ_SIZE_T)w);
                 planes[0] += w;
                 planes[1] += w;
                 planes[2] += w;
@@ -1508,3 +1536,337 @@ opj_image_t* tiftoimage(const char *filename, opj_cparameters_t *parameters)
 
 }/* tiftoimage() */
 
+/* 2017-09-14 Ralfs , use more abstract approach with full image in memory from
+	TIFFReadRGBAImageOriented(TIFF*, uint32, uint32, uint32*, int, int);
+	*/
+opj_image_t* tifRGBAtoimage(const wchar_t *filename, opj_cparameters_t *parameters, opj_msg_callback msg)
+{
+	int subsampling_dx = parameters->subsampling_dx;
+	int subsampling_dy = parameters->subsampling_dy;
+	TIFF *tif;
+	tdata_t buf;
+	tstrip_t strip;
+	int64_t strip_size, rowStride, TIFF_MAX;
+	int j, currentPlane, numcomps = 0, w, h;
+	OPJ_COLOR_SPACE color_space = OPJ_CLRSPC_UNKNOWN;
+	opj_image_cmptparm_t cmptparm[4]; /* RGBA */
+	opj_image_t *image = NULL;
+	uint16 tiBps, tiPhoto, tiSf, tiSpp, tiPC;
+	uint32 tiWidth, tiHeight;
+	float dpix, dpiy;
+	uint16 tiCompression;
+	OPJ_BOOL is_cinema = OPJ_IS_CINEMA(parameters->rsiz);
+	convert_XXx32s_C1R cvtTifTo32s = NULL;
+	convert_32s_CXPX cvtCxToPx = NULL;
+	OPJ_INT32* buffer32s = NULL;
+	OPJ_INT32* planes[4];
+
+	tif = TIFFOpenW(filename, "r");
+
+	if (!tif) {
+		if (msg != NULL)
+		msg("tiftoimage: Failed to open TIF for reading\n", NULL);
+		return NULL;
+	}
+	tiBps = tiPhoto = tiSf = tiSpp = tiPC = 0;
+	tiWidth = tiHeight = 0;
+	dpix = dpiy = 0;
+	TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &tiWidth);
+	TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &tiHeight);
+	TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &tiBps);
+	TIFFGetField(tif, TIFFTAG_SAMPLEFORMAT, &tiSf);
+	TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &tiSpp);
+	TIFFGetField(tif, TIFFTAG_PHOTOMETRIC, &tiPhoto);
+	TIFFGetField(tif, TIFFTAG_PLANARCONFIG, &tiPC);
+	TIFFGetField(tif, TIFFTAG_XRESOLUTION, &dpix);
+	TIFFGetField(tif, TIFFTAG_YRESOLUTION, &dpiy);
+	TIFFGetField(tif, TIFFTAG_COMPRESSION, &tiCompression);
+
+	w = (int)tiWidth;
+	h = (int)tiHeight;
+	size_t pixels = w * h;
+
+	if (w < 1 || h < 1 || pixels / h != w)
+	{
+		TIFFClose(tif);
+		if (msg != NULL)
+			msg("tiftoimage: image dimensions are wrong\n", NULL);
+		return NULL;
+	}
+
+	uint32 * picbuff = malloc(pixels * sizeof(uint32));
+	if (picbuff == NULL)
+	{
+		TIFFClose(tif);
+		if (msg != NULL)
+			msg("tiftoimage: not enough memory for image\n", NULL);
+		return NULL;
+	}
+
+	
+	if (TIFFReadRGBAImageOriented(tif, w, h, picbuff, ORIENTATION_TOPLEFT, 0) == 0)
+	{
+		free(picbuff);
+		TIFFClose(tif);
+		if (msg != NULL)
+			msg("tiftoimage: failed to read image\n", NULL);
+		return NULL;
+
+	}
+	/* 2017-09-14 Ralfs , here we might have ABRG 32-bit image raster */
+	/* Assume that libtiff rendered image as good as it can. tiBps > 8 won't be original colors anymore */
+	/* There are no extra bytes in raster for scanline word alignment */
+
+
+
+	/* 2017-09-04 Ralfs , remedy for malformed TIF tags */
+	if (tiSpp == 0) tiSpp = 1;
+
+	if (tiSpp == 0 || tiSpp > 4) { /* should be 1 ... 4 */
+		fprintf(stderr, "tiftoimage: Bad value for samples per pixel == %d.\n"
+			"\tAborting.\n", tiSpp);
+		TIFFClose(tif);
+		return NULL;
+	}
+	if (tiBps > 16U || tiBps == 0) {
+		fprintf(stderr, "tiftoimage: Bad values for Bits == %d.\n"
+			"\tMax. 16 Bits are allowed here.\n\tAborting.\n", tiBps);
+		TIFFClose(tif);
+		return NULL;
+	}
+	if (tiPhoto != PHOTOMETRIC_MINISWHITE  && tiPhoto != PHOTOMETRIC_MINISBLACK &&
+		tiPhoto != PHOTOMETRIC_RGB && tiPhoto != PHOTOMETRIC_PALETTE) {
+		fprintf(stderr,
+			"tiftoimage: Bad color format %d.\n\tOnly RGB(A) and GRAY(A) has been implemented\n\tAborting.\n",
+			(int)tiPhoto);
+		TIFFClose(tif);
+		return NULL;
+	}
+	if (tiWidth == 0 || tiHeight == 0) {
+		fprintf(stderr, "tiftoimage: Bad values for width(%u) "
+			"and/or height(%u)\n\tAborting.\n", tiWidth, tiHeight);
+		TIFFClose(tif);
+		return NULL;
+	}
+	w = (int)tiWidth;
+	h = (int)tiHeight;
+
+	switch (tiBps) {
+	case 1:
+	case 2:
+	case 4:
+	case 6:
+	case 8:
+		cvtTifTo32s = convert_XXu32s_C1R_LUT[tiBps];
+		break;
+		/* others are specific to TIFF */
+	case 3:
+		cvtTifTo32s = tif_3uto32s;
+		break;
+	case 5:
+		cvtTifTo32s = tif_5uto32s;
+		break;
+	case 7:
+		cvtTifTo32s = tif_7uto32s;
+		break;
+	case 9:
+		cvtTifTo32s = tif_9uto32s;
+		break;
+	case 10:
+		cvtTifTo32s = tif_10uto32s;
+		break;
+	case 11:
+		cvtTifTo32s = tif_11uto32s;
+		break;
+	case 12:
+		cvtTifTo32s = tif_12uto32s;
+		break;
+	case 13:
+		cvtTifTo32s = tif_13uto32s;
+		break;
+	case 14:
+		cvtTifTo32s = tif_14uto32s;
+		break;
+	case 15:
+		cvtTifTo32s = tif_15uto32s;
+		break;
+	case 16:
+		cvtTifTo32s = (convert_XXx32s_C1R)tif_16uto32s;
+		break;
+	default:
+		/* never here */
+		break;
+	}
+
+	/* initialize image components */
+	memset(&cmptparm[0], 0, 4 * sizeof(opj_image_cmptparm_t));
+
+	if ((tiPhoto == PHOTOMETRIC_RGB) && (is_cinema) && (tiBps != 12U)) {
+		fprintf(stdout, "WARNING:\n"
+			"Input image bitdepth is %d bits\n"
+			"TIF conversion has automatically rescaled to 12-bits\n"
+			"to comply with cinema profiles.\n",
+			tiBps);
+	}
+	else {
+		is_cinema = 0U;
+	}
+
+	numcomps = tiSpp;
+	if (tiPhoto == PHOTOMETRIC_RGB || tiPhoto == PHOTOMETRIC_MINISWHITE) { /* RGB(A) or 1bpp */
+		color_space = OPJ_CLRSPC_SRGB;
+	}
+	else if (tiPhoto == PHOTOMETRIC_MINISBLACK ||
+		(tiPhoto == PHOTOMETRIC_PALETTE && tiBps == 8 && tiSpp == 1)) { /* GRAY(A) */
+		color_space = OPJ_CLRSPC_GRAY;
+	}
+
+
+	cvtCxToPx = convert_32s_CXPX_LUT[numcomps];
+	if (tiPC == PLANARCONFIG_SEPARATE) {
+		cvtCxToPx = convert_32s_CXPX_LUT[1]; /* override */
+		tiSpp = 1U; /* consider only one sample per plane */
+	}
+
+	for (j = 0; j < numcomps; j++) {
+		cmptparm[j].prec = tiBps;
+		cmptparm[j].bpp = tiBps;
+		cmptparm[j].dx = (OPJ_UINT32)subsampling_dx;
+		cmptparm[j].dy = (OPJ_UINT32)subsampling_dy;
+		cmptparm[j].w = (OPJ_UINT32)w;
+		cmptparm[j].h = (OPJ_UINT32)h;
+	}
+
+	image = opj_image_create((OPJ_UINT32)numcomps, &cmptparm[0], color_space);
+	if (!image) {
+		TIFFClose(tif);
+		return NULL;
+	}
+	/* set image offset and reference grid */
+	image->x0 = (OPJ_UINT32)parameters->image_offset_x0;
+	image->y0 = (OPJ_UINT32)parameters->image_offset_y0;
+	image->x1 = !image->x0 ? (OPJ_UINT32)(w - 1) * (OPJ_UINT32)subsampling_dx + 1 :
+		image->x0 + (OPJ_UINT32)(w - 1) * (OPJ_UINT32)subsampling_dx + 1;
+	if (image->x1 <= image->x0) {
+		fprintf(stderr, "tiftoimage: Bad value for image->x1(%d) vs. "
+			"image->x0(%d)\n\tAborting.\n", image->x1, image->x0);
+		TIFFClose(tif);
+		opj_image_destroy(image);
+		return NULL;
+	}
+	image->y1 = !image->y0 ? (OPJ_UINT32)(h - 1) * (OPJ_UINT32)subsampling_dy + 1 :
+		image->y0 + (OPJ_UINT32)(h - 1) * (OPJ_UINT32)subsampling_dy + 1;
+	if (image->y1 <= image->y0) {
+		fprintf(stderr, "tiftoimage: Bad value for image->y1(%d) vs. "
+			"image->y0(%d)\n\tAborting.\n", image->y1, image->y0);
+		TIFFClose(tif);
+		opj_image_destroy(image);
+		return NULL;
+	}
+	/* 2017-09-01 Ralfs , set dpi values */
+	for (j = 0; j < numcomps; j++) {
+		planes[j] = image->comps[j].data;
+		image->comps[j].hdpi = dpix;
+		image->comps[j].vdpi = dpiy;
+	}
+	image->comps[numcomps - 1].alpha = (OPJ_UINT16)(1 - (numcomps & 1));
+
+	strip_size = (int64_t)TIFFStripSize(tif);
+
+	buf = malloc((OPJ_SIZE_T)strip_size);
+	if (buf == NULL) {
+		TIFFClose(tif);
+		opj_image_destroy(image);
+		return NULL;
+	}
+	if (sizeof(tsize_t) == 4) {
+		TIFF_MAX = INT_MAX;
+	}
+	else {
+		TIFF_MAX = UINT_MAX;
+	}
+	if ((int64_t)tiWidth > (int64_t)(TIFF_MAX / tiSpp) ||
+		(int64_t)(tiWidth * tiSpp) > (int64_t)(TIFF_MAX / tiBps) ||
+		(int64_t)(tiWidth * tiSpp) > (int64_t)(TIFF_MAX / (int64_t)sizeof(OPJ_INT32))) {
+		fprintf(stderr, "Buffer overflow\n");
+		_TIFFfree(buf);
+		TIFFClose(tif);
+		opj_image_destroy(image);
+		return NULL;
+	}
+
+	rowStride = (int64_t)((tiWidth * tiSpp * tiBps + 7U) / 8U);
+	buffer32s = (OPJ_INT32 *)malloc((OPJ_SIZE_T)(tiWidth * tiSpp * sizeof(
+		OPJ_INT32)));
+	if (buffer32s == NULL) {
+		_TIFFfree(buf);
+		TIFFClose(tif);
+		opj_image_destroy(image);
+		return NULL;
+	}
+
+	strip = 0;
+	currentPlane = 0;
+	do {
+		planes[0] = image->comps[currentPlane].data; /* to manage planar data */
+		h = (int)tiHeight;
+		/* Read the Image components */
+		for (; (h > 0) && (strip < TIFFNumberOfStrips(tif)); strip++) {
+			const OPJ_UINT8 *dat8;
+			int64_t ssize;
+
+			ssize = (int64_t)TIFFReadEncodedStrip(tif, strip, buf, (tsize_t)strip_size);
+
+			if (ssize < 1 || ssize > strip_size) {
+				fprintf(stderr, "tiftoimage: Bad value for ssize(%" PRId64 ") "
+					"vs. strip_size(%" PRId64 ").\n\tAborting.\n", ssize, strip_size);
+				_TIFFfree(buf);
+				_TIFFfree(buffer32s);
+				TIFFClose(tif);
+				opj_image_destroy(image);
+				return NULL;
+			}
+			dat8 = (const OPJ_UINT8*)buf;
+
+			while (ssize >= rowStride) {
+				/* 2017-09-03 Ralfs , invert bits if MINISWHITE and image is 1bpp */
+				/* more effective would be invert during bit expansion */
+				if (tiPhoto == PHOTOMETRIC_MINISWHITE && tiBps == 1 && tiSpp == 1)
+				{
+					OPJ_UINT8* bitline = malloc(rowStride);
+					OPJ_UINT8* p = bitline, *d = dat8;
+					for (int i = 0; i < rowStride; i++)
+					{
+						p[i] = ~(d[i]);
+					}
+					cvtTifTo32s(bitline, buffer32s, (OPJ_SIZE_T)w * tiSpp);
+					free(bitline);
+				}
+				else
+					cvtTifTo32s(dat8, buffer32s, (OPJ_SIZE_T)w * tiSpp);
+				cvtCxToPx(buffer32s, planes, (OPJ_SIZE_T)w);
+				planes[0] += w;
+				planes[1] += w;
+				planes[2] += w;
+				planes[3] += w;
+				dat8 += rowStride;
+				ssize -= rowStride;
+				h--;
+			}
+		}
+		currentPlane++;
+	} while ((tiPC == PLANARCONFIG_SEPARATE) && (currentPlane < numcomps));
+
+	free(buffer32s);
+	_TIFFfree(buf);
+	TIFFClose(tif);
+
+	if (is_cinema) {
+		for (j = 0; j < numcomps; ++j) {
+			scale_component(&(image->comps[j]), 12);
+		}
+
+	}
+	return image;
+
+}/* tiftoimage() */
