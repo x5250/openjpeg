@@ -1,0 +1,2 @@
+Changed original files to process several files as batch and to write resolution boxes to jp2 files.
+Some changes affect only Windows builds. Codec changes might work on all platforms.
